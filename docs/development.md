@@ -16,6 +16,8 @@ sed -i 's/^import recommendation_pb2 as recommendation__pb2/from . import recomm
 
 PRODUCT_CATALOG_SERVICE_ADDR=localhost:3550 python src/server.py
 pytest                        # tests (pytest.ini sets pythonpath=src)
+# tests/test_lifecycle.py compiles the proto into a temp dir itself (needs grpcio-tools from requirements.txt), starts
+# the real server with every telemetry variable unset, checks the JSON log lines and that SIGTERM exits 0
 
 docker build -t recommendation-service .
 docker run --rm -p 8081:8080 \
@@ -36,13 +38,13 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 ```
 ├── src/
-│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub
-│   ├── telemetry.py     # OTel traces/metrics (server + client instrumentation), Prometheus server, Pyroscope; imported first
+│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, JSON logs, SIGTERM
+│   ├── telemetry.py     # telemetry contract, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown; imported first
 │   ├── generated/       # protoc output (git: only __init__.py; real stubs are built in Docker)
 │   └── __init__.py
 ├── proto/               # recommendation.proto, health.proto
 ├── requirements.in / requirements.txt / requirements-dev.txt
 ├── pyproject.toml / pytest.ini / .python-version / .trivyignore
-├── Dockerfile
+├── Dockerfile / .dockerignore
 └── docs/                # empty placeholder
 ```

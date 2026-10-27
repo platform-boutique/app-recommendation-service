@@ -34,18 +34,21 @@ The frontend then keeps at most 4 of the returned IDs and fetches each product f
 |---|---|---|---|
 | `PRODUCT_CATALOG_SERVICE_ADDR` | **Yes** | — | `host:port` (no scheme) of product-catalog gRPC. **The process exits at startup with `RuntimeError` if unset** |
 | `PORT` | No | `8080` | gRPC listen port |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `http://localhost:4317` | OTLP/**gRPC** endpoint for **traces, metrics and logs** (scheme required), e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Legacy fallback: `COLLECTOR_SERVICE_ADDR` (`host:port`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs** (scheme required), e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Legacy fallback: `COLLECTOR_SERVICE_ADDR` (`host:port`). Telemetry is on only when one of them is set and non-empty |
+| `OTEL_SDK_DISABLED` | No | — | `true` forces telemetry off even with an endpoint set (the legacy `ENABLE_TRACING=0` does the same) |
 | `OTEL_METRIC_EXPORT_INTERVAL` | No | `15000` | Milliseconds between metric pushes |
 | `OTEL_SERVICE_NAME` | No | `recommendation-service` | `service.name` — becomes the Prometheus `job` and the Loki `service_name`; keep the default, dashboards depend on it |
 | `SERVICE_VERSION` | No | `1.0.0` | `service.version` resource attribute |
-| `PYROSCOPE_ADDR` | No | `http://localhost:4040` | Profiles use the Pyroscope SDK push protocol (**not** OTLP). Point it at Alloy (`http://alloy.monitoring.svc.cluster.local:4040`), which forwards to Pyroscope, or directly at Pyroscope |
+| `PYROSCOPE_ADDR` | No | unset (profiling off) | Profiles use the Pyroscope SDK push protocol (**not** OTLP). Point it at Alloy (`http://alloy.monitoring.svc.cluster.local:4040`), which forwards to Pyroscope, or directly at Pyroscope. Profiling is on only when this is set and non-empty |
+| `ENABLE_PROFILING` | No | — | `0` forces profiling off even with `PYROSCOPE_ADDR` set; any other value (or unset) leaves the decision to `PYROSCOPE_ADDR` |
 
 Notes:
 
 - The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail. No per-call deadline is set.
 - Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
-- The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs keep going to stdout and are additionally exported over OTLP with trace ids.
-- Telemetry and profiling cannot be switched off with a flag; with no reachable collector the exporters just log errors and the service keeps serving.
+- The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs go to stdout as JSON lines and, with telemetry on, are additionally exported over OTLP with trace ids.
+- With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `RecommendationService gRPC server started on port 8080 (telemetry off, profiling off)` (verified from source and in the image).
+- With an endpoint set but no reachable collector, the exporters log retry errors to stderr and the service keeps serving.
 
 ## Container image
 
@@ -53,15 +56,16 @@ Multi-stage [`Dockerfile`](Dockerfile):
 
 | Stage | Base | What happens |
 |---|---|---|
-| builder | `python:3.12-alpine` | installs `g++`/`linux-headers`, `pip install -r requirements.in`, **compiles the protos** with `grpc_tools.protoc` into `generated/` and patches the relative import in `recommendation_pb2_grpc.py` |
+| builder | `python:3.12-alpine` | installs `g++`/`linux-headers`, `pip install -r requirements.txt` (fully pinned), **compiles the protos** with `grpc_tools.protoc` into `generated/` and patches the relative import in `recommendation_pb2_grpc.py` |
 | runtime | `python:3.12-alpine` | copies site-packages, generated stubs (`/app/src/generated`), `src/`; runs as non-root |
 
 - **Entrypoint:** `python src/server.py` (working dir `/app`).
-- **User:** `appuser` — UID `100`, GID `101` (verified). Set `runAsUser: 100` for `runAsNonRoot`.
+- **User:** numeric `USER 100:101` (`appuser`/`appgroup`, created with these fixed ids; `id` in the container prints `uid=100(appuser) gid=101(appgroup)`). Matches the chart's `runAsUser: 100` / `runAsGroup: 101`.
 - **EXPOSE:** `8080` only.
 - **Docker `HEALTHCHECK`:** Python `grpc.channel_ready_future` against `localhost:${PORT:-8080}`.
-- **Image size:** ~41 MB.
-- **Reproducibility:** the image installs from `requirements.in` (direct deps pinned, transitive floating), not the fully pinned `requirements.txt`.
+- **Image size:** 175 MB uncompressed (`docker images`, local build on 2026-10-27; the earlier ~41 MB figure was not re-measured and is probably the compressed registry size).
+- **Reproducibility:** the image installs from the fully pinned `requirements.txt` (compiled from `requirements.in` with `uv`), so transitive versions no longer float between builds. The lock was not regenerated in this change.
+- **Build context:** [`.dockerignore`](.dockerignore) keeps `.git`, tests, docs, caches and locally compiled stubs out of the context.
 - The generated stubs are not in git; they only exist after the Docker build.
 
 ## Kubernetes deployment notes
@@ -91,7 +95,7 @@ livenessProbe:
   failureThreshold: 3
 ```
 
-**Graceful shutdown:** the process runs as PID 1 and installs no `SIGTERM` handler, so the kernel drops `SIGTERM` and each termination waits out the grace period. Set `terminationGracePeriodSeconds: 5`.
+**Graceful shutdown:** `SIGTERM` (and `SIGINT`) is handled even as PID 1: the server stops accepting new RPCs, gives in-flight ones up to 2 s (`server.stop(2)`), flushes telemetry when it is on (bounded at 2 s, also when the collector is unreachable) and exits `0`. The worst case (4 s) fits the chart's `terminationGracePeriodSeconds: 5`. Measured: `docker stop` on the idle container returned in 0.29 s with exit code 0; running from source against a stub OTLP receiver, the final traces, metrics and logs batches arrived after `SIGTERM` and the process exited 0 (a test covers the unreachable-collector bound).
 
 **Security context**
 
@@ -127,12 +131,12 @@ and was verified in the earlier local phase on a 3-node kind cluster (since dele
 
 | Signal | Implementation | Destination |
 |---|---|---|
-| **Traces** | OpenTelemetry SDK, `GrpcInstrumentorServer` and `GrpcInstrumentorClient` (so the catalog call is a child span), OTLP/gRPC exporter (`BatchSpanProcessor`) | Alloy `:4317` → Tempo |
+| **Traces** | OpenTelemetry SDK, `GrpcInstrumentorServer` and `GrpcInstrumentorClient` (so the catalog call is a child span), OTLP/gRPC exporter (`BatchSpanProcessor`); only when telemetry is on | Alloy `:4317` → Tempo |
 | **Metrics** | Hand-rolled RPC instruments, `PeriodicExportingMetricReader` over OTLP/gRPC every 15 s (replaces the Prometheus reader) | Alloy → Mimir |
-| **Logs** | Python `logging` with a hand-built JSON format to stdout **and** an OTel `LoggingHandler` (OTLP/gRPC, with trace ids) | Alloy → Loki |
-| **Profiles** | `pyroscope-io`, tagged with `version` | Alloy `:4040` → Pyroscope |
+| **Logs** | Python `logging` with `python-json-logger` to stdout (always) **and** an OTel `LoggingHandler` (OTLP/gRPC, with trace ids; only when telemetry is on) | Alloy → Loki |
+| **Profiles** | `pyroscope-io`, tagged with `version`; only when profiling is on | Alloy `:4040` → Pyroscope |
 
-Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). The JSON stdout line is built with a plain format string, so messages containing `"` can yield invalid JSON (the OTLP copy is unaffected).
+Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). Each stdout line is one valid JSON object with the keys `timestamp` (epoch seconds), `severity`, `name`, `message` (quotes and newlines, e.g. in gRPC error texts, are escaped; a test asserts this).
 
 Every series carries `job="recommendation-service"` (from `service.name`) and `instance=<pod name>` (`service.instance.id`), which is what the Grafana dashboards select on. Logs land in Loki with `service_name="recommendation-service"` and trace/span ids, so a log line links to its trace.
 
@@ -152,6 +156,8 @@ sed -i 's/^import recommendation_pb2 as recommendation__pb2/from . import recomm
 
 PRODUCT_CATALOG_SERVICE_ADDR=localhost:3550 python src/server.py
 pytest                        # tests (pytest.ini sets pythonpath=src)
+# tests/test_lifecycle.py compiles the proto into a temp dir itself (needs grpcio-tools from requirements.txt), starts
+# the real server with every telemetry variable unset, checks the JSON log lines and that SIGTERM exits 0
 
 docker build -t recommendation-service .
 docker run --rm -p 8081:8080 \
@@ -172,14 +178,14 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 ```
 ├── src/
-│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub
-│   ├── telemetry.py     # OTel traces/metrics (server + client instrumentation), Prometheus server, Pyroscope; imported first
+│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, JSON logs, SIGTERM
+│   ├── telemetry.py     # telemetry contract, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown; imported first
 │   ├── generated/       # protoc output (git: only __init__.py; real stubs are built in Docker)
 │   └── __init__.py
 ├── proto/               # recommendation.proto, health.proto
 ├── requirements.in / requirements.txt / requirements-dev.txt
 ├── pyproject.toml / pytest.ini / .python-version / .trivyignore
-├── Dockerfile
+├── Dockerfile / .dockerignore
 └── docs/                # empty placeholder
 ```
 
@@ -188,4 +194,5 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 - Fetches the whole catalog on every request (fine for 9 products; will not scale to large catalogs).
 - Recommendations are random — no ranking, no use of `user_id`.
 - Health ignores catalog availability; no deadline on the catalog call.
-- `SIGTERM` is ignored when running as PID 1 (see Graceful shutdown).
+- Health stays `SERVING` during the 2 s shutdown drain (it is static).
+- `requirements.txt` was compiled for Python 3.13 (`--python-version 3.13`) while the image runs 3.12; it installs and runs there (verified by the image build and the local test run on Python 3.12), but the lock was not recompiled for 3.12.
