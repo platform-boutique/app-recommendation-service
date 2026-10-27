@@ -8,9 +8,10 @@ RUN apk add --no-cache g++ linux-headers
 
 WORKDIR /build
 
-# Install dependencies (includes grpcio-tools for proto compilation)
-COPY requirements.in .
-RUN pip install --no-cache-dir -r requirements.in
+# Install dependencies from the fully pinned lock (includes grpcio-tools for proto compilation;
+# requirements.in is its source; regenerate with uv pip compile)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Generate proto stubs
 COPY proto/ ./proto/
@@ -30,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apk add --no-cache libstdc++ \
-    && addgroup -S appgroup && adduser -S appuser -G appgroup
+    && addgroup -S -g 101 appgroup && adduser -S -u 100 -G appgroup appuser
 
 WORKDIR /app
 
@@ -44,7 +45,8 @@ COPY --from=builder --chown=appuser:appgroup /build/generated ./src/generated/
 # Copy application source
 COPY --chown=appuser:appgroup src/ ./src/
 
-USER appuser
+# Numeric so Kubernetes runAsNonRoot can verify it (matches the charts' runAsUser: 100 / runAsGroup: 101)
+USER 100:101
 
 EXPOSE 8080
 

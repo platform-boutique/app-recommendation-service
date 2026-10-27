@@ -2,12 +2,16 @@
 import logging
 import os
 import random
-import time
+import signal
+import sys
+import threading
 from concurrent import futures
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
+from pythonjsonlogger.json import JsonFormatter
 
+import telemetry
 from generated import recommendation_pb2, recommendation_pb2_grpc
 from telemetry import start_rpc_metrics  # noqa: F401, E402
 
@@ -16,10 +20,12 @@ from telemetry import start_rpc_metrics  # noqa: F401, E402
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("recommendation-service")
-handler = logging.StreamHandler()
+handler = logging.StreamHandler(sys.stdout)
+# One valid JSON object per line (quotes and newlines in messages are escaped); same keys as before.
 handler.setFormatter(
-    logging.Formatter(
-        '{"timestamp": %(created)f, "severity": "%(levelname)s", "name": "%(name)s", "message": "%(message)s"}'
+    JsonFormatter(
+        ["created", "levelname", "name", "message"],
+        rename_fields={"created": "timestamp", "levelname": "severity"},
     )
 )
 logger.addHandler(handler)
@@ -97,8 +103,33 @@ class HealthServicer(health_pb2_grpc.HealthServicer):
 # ---------------------------------------------------------------------------
 
 
-def main():
+# Seconds in-flight RPCs get to finish after SIGTERM before they are cancelled. Drain (2 s) plus the telemetry
+# flush (at most 2 s) stays inside the charts' terminationGracePeriodSeconds: 5.
+SHUTDOWN_GRACE_SECONDS = 2
+
+
+def install_signal_handlers(stop_event: threading.Event) -> None:
+    """SIGTERM/SIGINT set stop_event. Needed because PID 1 in a container ignores signals without a handler."""
+
+    def _handler(signum, _frame):
+        logger.info(f"Received {signal.Signals(signum).name}, shutting down")
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
+
+def shutdown(server, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
+    """Stop accepting RPCs, let in-flight ones finish for up to `grace` seconds, then flush telemetry."""
+    server.stop(grace).wait()
+    logger.info("RecommendationService stopped")
+    telemetry.shutdown()
+
+
+def main() -> int:
     port = os.environ.get("PORT", "8080")
+    stop_event = threading.Event()
+    install_signal_handlers(stop_event)
 
     product_catalog_stub = _build_product_catalog_stub()
 
@@ -110,14 +141,12 @@ def main():
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()
-    logger.info(f"RecommendationService gRPC server started on port {port}")
+    logger.info(f"RecommendationService gRPC server started on port {port} ({telemetry.describe()})")
 
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        server.stop(0)
+    stop_event.wait()
+    shutdown(server)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

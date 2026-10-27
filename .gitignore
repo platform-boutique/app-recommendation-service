@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.ruff_cache/
+# compiled locally from proto/ (see README); only __init__.py is tracked
+src/generated/*_pb2*.py
