@@ -13,6 +13,7 @@ from pythonjsonlogger.json import JsonFormatter
 
 import telemetry
 from generated import recommendation_pb2, recommendation_pb2_grpc
+from ranking import Ranker
 from telemetry import start_rpc_metrics  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
@@ -54,20 +55,32 @@ def _build_product_catalog_stub() -> recommendation_pb2_grpc.ProductCatalogServi
 class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServiceServicer):
     MAX_RESPONSES = 5
 
-    def __init__(self, product_catalog_stub):
+    def __init__(self, product_catalog_stub, ranker=None):
         self._catalog = product_catalog_stub
+        self._ranker = ranker if ranker is not None else Ranker(product_catalog_stub, recommendation_pb2)
+
+    def _rank(self, request):
+        """Ranked ids (categories of the viewed products, rating desc), or None if the catalog cannot answer."""
+        try:
+            return self._ranker.recommend(request.product_ids)
+        except Exception as err:  # any catalog trouble: the caller still gets recommendations
+            logger.warning(f"Ranked recommendations unavailable, falling back to random picks: {err!r}")
+            return None
+
+    def _random_pick(self, owned_ids):
+        """The original behaviour: random sample of the whole catalog minus the given ids."""
+        cat_response = self._catalog.ListProducts(recommendation_pb2.Empty())
+        all_ids = [p.id for p in cat_response.products]
+        candidates = list(set(all_ids) - set(owned_ids))
+        num_return = min(self.MAX_RESPONSES, len(candidates))
+        return random.SystemRandom().sample(candidates, num_return)
 
     def ListRecommendations(self, request, context):
         end_metrics = start_rpc_metrics("ListRecommendations")
         try:
-            # Fetch all products from the catalog
-            cat_response = self._catalog.ListProducts(recommendation_pb2.Empty())
-            all_ids = [p.id for p in cat_response.products]
-
-            # Filter out products the user already has, then sample randomly
-            candidates = list(set(all_ids) - set(request.product_ids))
-            num_return = min(self.MAX_RESPONSES, len(candidates))
-            recommended = random.SystemRandom().sample(candidates, num_return)
+            recommended = self._rank(request)
+            if recommended is None:
+                recommended = self._random_pick(request.product_ids)
 
             logger.info(f"ListRecommendations user_id={request.user_id} returning product_ids={recommended}")
 
