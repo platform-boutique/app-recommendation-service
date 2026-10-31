@@ -3,7 +3,7 @@
 <div class="pd-hero" markdown>
 <span class="pd-kicker">service · platform-demo</span>
 
-A gRPC service that returns product recommendations for the platform-demo e-commerce platform. For each request it fetches the **entire** product list from `product-catalog-service`, removes the products the user already has, and returns a random sample of up to 5 product IDs. It is stateless and is called only by `frontend`.
+A gRPC service that returns product recommendations for the platform-demo e-commerce platform. For each request it looks at the products the visitor is viewing, takes their categories (the catalog's departments), and returns up to 5 other products of those categories ranked by rating, then review count; with no usable input it returns the top-rated products of the whole shop. If the catalog cannot answer it falls back to random picks. It is stateless and is called only by `frontend`.
 </div>
 
 <div class="pd-facts" markdown>
@@ -35,7 +35,7 @@ flowchart LR
 | **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests` |
 | **Health** | `grpc.health.v1.Health/Check` on `8080` — static `SERVING`, does **not** reflect catalog availability |
 | **State** | None |
-| **Depends on** | `product-catalog-service:3550` (`ListProducts`) |
+| **Depends on** | `product-catalog-service:3550` (`GetProduct`, `ListProductsFiltered`; `ListProducts` only for the random fallback) |
 | **Called by** | `frontend` (`ListRecommendations`) |
 | **gRPC reflection** | Not enabled — pass `-proto` to `grpcurl` |
 

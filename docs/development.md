@@ -18,6 +18,8 @@ PRODUCT_CATALOG_SERVICE_ADDR=localhost:3550 python src/server.py
 pytest                        # tests (pytest.ini sets pythonpath=src)
 # tests/test_lifecycle.py compiles the proto into a temp dir itself (needs grpcio-tools from requirements.txt), starts
 # the real server with every telemetry variable unset, checks the JSON log lines and that SIGTERM exits 0
+# tests/test_ranking.py compiles the proto too and runs the ranking against a fake catalog gRPC server (tests/catalog_fake.py),
+# in-process and with the real server.py in a subprocess (ranking, exclusion, paging, 60 s cache, fallback)
 
 docker build -t recommendation-service .
 docker run --rm -p 8081:8080 \
@@ -38,7 +40,8 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 ```
 ├── src/
-│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, JSON logs, SIGTERM
+│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, random fallback, JSON logs, SIGTERM
+│   ├── ranking.py       # category/rating ranking, 60 s monotonic-clock cache of the catalog category lists
 │   ├── telemetry.py     # telemetry contract, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown; imported first
 │   ├── generated/       # protoc output (git: only __init__.py; real stubs are built in Docker)
 │   └── __init__.py

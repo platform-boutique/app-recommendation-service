@@ -1,6 +1,6 @@
 # recommendation-service
 
-A gRPC service that returns product recommendations for the platform-demo e-commerce platform. For each request it fetches the **entire** product list from `product-catalog-service`, removes the products the user already has, and returns a random sample of up to 5 product IDs. It is stateless and is called only by `frontend`.
+A gRPC service that returns product recommendations for the platform-demo e-commerce platform. For each request it looks at the products the visitor is viewing, takes their categories (the catalog's departments), and returns up to 5 other products of those categories ranked by rating, then review count; with no usable input it returns the top-rated products of the whole shop. If the catalog cannot answer it falls back to random picks. It is stateless and is called only by `frontend`.
 
 Part of the [platform-demo](https://github.com/platform-boutique) platform — microservices, observability (LGTM stack), GitOps (Argo CD), policy enforcement (Kyverno), infrastructure provisioning (Terraform) and an internal developer portal (Backstage). See the master `README.md` in the platform-demo root for the whole-system view.
 
@@ -14,19 +14,31 @@ Part of the [platform-demo](https://github.com/platform-boutique) platform — m
 | **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests` |
 | **Health** | `grpc.health.v1.Health/Check` on `8080` — static `SERVING`, does **not** reflect catalog availability |
 | **State** | None |
-| **Depends on** | `product-catalog-service:3550` (`ListProducts`) |
+| **Depends on** | `product-catalog-service:3550` (`GetProduct`, `ListProductsFiltered`; `ListProducts` only for the random fallback) |
 | **Called by** | `frontend` (`ListRecommendations`) |
 | **gRPC reflection** | Not enabled — pass `-proto` to `grpcurl` |
 
 ## API
 
-Package `hipstershop`, service `RecommendationService` ([`proto/recommendation.proto`](proto/recommendation.proto)); health in [`proto/health.proto`](proto/health.proto). The proto also embeds the client definition of `ProductCatalogService.ListProducts`.
+Package `hipstershop`, service `RecommendationService` ([`proto/recommendation.proto`](proto/recommendation.proto)); health in [`proto/health.proto`](proto/health.proto). The proto also embeds the client definition of the `ProductCatalogService` calls this service makes (`ListProducts`, `GetProduct`, `ListProductsFiltered`); it is a copy of the catalog's proto with identical field numbers, additive changes only.
 
 | Method | Request | Response | Behaviour |
 |---|---|---|---|
-| `ListRecommendations` | `{ string user_id, repeated string product_ids }` | `{ repeated string product_ids }` | `candidates = all catalog IDs − request.product_ids`; returns `min(5, len(candidates))` random picks. `user_id` is only logged. If the catalog call fails → gRPC `INTERNAL` ("Failed to fetch product catalog.") |
+| `ListRecommendations` | `{ string user_id, repeated string product_ids }` | `{ repeated string product_ids }` | Ranked recommendations, at most 5, see [Recommendation logic](#recommendation-logic). `user_id` is only logged. Catalog trouble does not reach the caller: the service falls back to random picks (below). Only if that fallback also fails → gRPC `INTERNAL` ("Failed to fetch product catalog.") |
 
 The frontend then keeps at most 4 of the returned IDs and fetches each product from the catalog.
+
+### Recommendation logic
+
+`product_ids` are the products the visitor is looking at (the viewed product and/or the cart lines).
+
+1. **Resolve.** Each distinct id (at most the first 10) is looked up with `GetProduct`. Ids the catalog does not know (`NOT_FOUND`) are skipped. The category of a product is its `department` (the catalog's `Category.id`, the same value the catalog's filter takes); products without one add no category.
+2. **Candidates.** For every collected category the service asks the catalog for `ListProductsFiltered(department, sort=RATING_DESC, page_size=50)` and pages through at most 3 pages (150 products). If no category was collected (no ids, none resolved, or only products without a department) the "category" is the whole shop (empty department filter).
+3. **Rank.** Candidates of all collected categories are merged, **every id in `product_ids` is removed (also unknown ones)**, and the rest is sorted by `rating` desc, `review_count` desc, product id asc. The first 5 ids are returned. The result is deterministic: same catalog state and same input give the same answer; `user_id` plays no part.
+4. **Cache.** The candidate list of each category (and of the whole shop) is cached in memory for **60 s**, measured on a monotonic clock (`time.monotonic`; the host's wall clock can jump by tens of seconds). The `GetProduct` lookups are not cached. A failed fetch is never cached. The cache is per process (replicas do not share it), so a catalog change shows up after at most 60 s.
+5. **Fallback.** If anything in steps 1-3 fails (catalog down, deadline of 2 s per call exceeded, an older catalog without `ListProductsFiltered`, any other error) the service logs one `WARNING` ("Ranked recommendations unavailable, falling back to random picks: ...") and answers with the **old behaviour**: `ListProducts`, remove the given ids, random sample of up to 5. The caller sees a normal response. Only when that old call fails as well does the caller get `INTERNAL`, as before.
+
+Edge cases: a category with no other product than the viewed one yields an empty list (there is no top-up from the whole shop); the 150-product limit per category means that in a larger category ties on rating at the page boundary are cut in the catalog's name order, not by review count.
 
 ## Configuration
 
@@ -44,7 +56,7 @@ The frontend then keeps at most 4 of the returned IDs and fetches each product f
 
 Notes:
 
-- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail. No per-call deadline is set.
+- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. The ranking calls have a 2 s deadline each (a constant, not configurable); the random fallback call has none.
 - Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
 - The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs go to stdout as JSON lines and, with telemetry on, are additionally exported over OTLP with trace ids.
 - With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `RecommendationService gRPC server started on port 8080 (telemetry off, profiling off)` (verified from source and in the image).
@@ -158,6 +170,8 @@ PRODUCT_CATALOG_SERVICE_ADDR=localhost:3550 python src/server.py
 pytest                        # tests (pytest.ini sets pythonpath=src)
 # tests/test_lifecycle.py compiles the proto into a temp dir itself (needs grpcio-tools from requirements.txt), starts
 # the real server with every telemetry variable unset, checks the JSON log lines and that SIGTERM exits 0
+# tests/test_ranking.py compiles the proto too and runs the ranking against a fake catalog gRPC server (tests/catalog_fake.py),
+# in-process and with the real server.py in a subprocess (ranking, exclusion, paging, 60 s cache, fallback)
 
 docker build -t recommendation-service .
 docker run --rm -p 8081:8080 \
@@ -178,7 +192,8 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 ```
 ├── src/
-│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, JSON logs, SIGTERM
+│   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, random fallback, JSON logs, SIGTERM
+│   ├── ranking.py       # category/rating ranking, 60 s monotonic-clock cache of the catalog category lists
 │   ├── telemetry.py     # telemetry contract, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown; imported first
 │   ├── generated/       # protoc output (git: only __init__.py; real stubs are built in Docker)
 │   └── __init__.py
@@ -191,8 +206,10 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 ## Known limitations
 
-- Fetches the whole catalog on every request (fine for 9 products; will not scale to large catalogs).
-- Recommendations are random — no ranking, no use of `user_id`.
-- Health ignores catalog availability; no deadline on the catalog call.
+- Ranking uses only categories, ratings and review counts; `user_id` is not used and nothing is personalised.
+- A category with no other product than the viewed one yields no recommendations (no top-up from the whole shop). At most 150 products per category are considered.
+- The category cache is per replica and lives 60 s; changes in the catalog appear after at most that long.
+- The random fallback still fetches the whole catalog (`ListProducts`) and has no deadline.
+- Health ignores catalog availability.
 - Health stays `SERVING` during the 2 s shutdown drain (it is static).
 - `requirements.txt` was compiled for Python 3.13 (`--python-version 3.13`) while the image runs 3.12; it installs and runs there (verified by the image build and the local test run on Python 3.12), but the lock was not recompiled for 3.12.
