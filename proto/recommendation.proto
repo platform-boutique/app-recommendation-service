@@ -18,9 +18,13 @@ message ListRecommendationsResponse {
 }
 
 // ---- ProductCatalogService (client stub only — called by this service) ----
+// Copy of the subset of product-catalog-service/proto/productcatalog.proto this service calls. Field numbers are
+// identical to the catalog's; only additive changes are allowed.
 
 service ProductCatalogService {
   rpc ListProducts(Empty) returns (ListProductsResponse) {}
+  rpc GetProduct(GetProductRequest) returns (Product) {}
+  rpc ListProductsFiltered(ListProductsRequest) returns (ListProductsResponse) {}
 }
 
 message Empty {}
@@ -32,6 +36,15 @@ message Product {
   string picture = 4;
   Money price_usd = 5;
   repeated string categories = 6;
+  string brand = 7;
+  double rating = 8;          // average rating 0-5
+  int32 review_count = 9;
+  int32 stock = 10;
+  int32 weight_grams = 11;
+  repeated string tags = 12;
+  repeated string images = 13;
+  string thumbnail = 14;
+  string department = 15;     // Category.id of the product's department, "" if none
 }
 
 message Money {
@@ -42,4 +55,28 @@ message Money {
 
 message ListProductsResponse {
   repeated Product products = 1;
+  // Set only by ListProductsFiltered.
+  int32 total = 2;      // number of matches over all pages
+  int32 page = 3;       // effective page (1-based)
+  int32 page_size = 4;  // effective page size
+}
+
+message GetProductRequest {
+  string id = 1;
+}
+
+enum ProductSort {
+  PRODUCT_SORT_UNSPECIFIED = 0;  // same as PRODUCT_SORT_NAME_ASC
+  PRODUCT_SORT_NAME_ASC = 1;
+  PRODUCT_SORT_PRICE_ASC = 2;
+  PRODUCT_SORT_PRICE_DESC = 3;
+  PRODUCT_SORT_RATING_DESC = 4;
+}
+
+message ListProductsRequest {
+  string department = 1;   // Category.id; "" = all departments
+  string query = 2;        // case-insensitive substring filter; "" = none
+  ProductSort sort = 3;
+  int32 page = 4;          // 1-based; 0 = 1
+  int32 page_size = 5;     // 0 = 24, values above 100 are capped at 100
 }
