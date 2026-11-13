@@ -48,20 +48,23 @@ Edge cases: a category with no other product than the viewed one yields an empty
 |---|---|---|---|
 | `PRODUCT_CATALOG_SERVICE_ADDR` | **Yes** | — | `host:port` (no scheme) of product-catalog gRPC. **The process exits at startup with `RuntimeError` if unset** |
 | `PORT` | No | `8080` | gRPC listen port |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs** (scheme required), e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Legacy fallback: `COLLECTOR_SERVICE_ADDR` (`host:port`). Telemetry is on only when one of them is set and non-empty |
-| `OTEL_SDK_DISABLED` | No | — | `true` forces telemetry off even with an endpoint set (the legacy `ENABLE_TRACING=0` does the same) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs**: an absolute `http(s)://host:port` URL, e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Telemetry is on only when this is a valid URL; empty or malformed means off (never a crash). The old `COLLECTOR_SERVICE_ADDR` and `ENABLE_TRACING` are no longer read |
+| `OTEL_SDK_DISABLED` | No | — | `true` (trimmed, any case) forces everything off: telemetry and profiling, even with an endpoint set |
 | `OTEL_METRIC_EXPORT_INTERVAL` | No | `15000` | Milliseconds between metric pushes |
 | `OTEL_SERVICE_NAME` | No | `recommendation-service` | `service.name` — becomes the Prometheus `job` and the Loki `service_name`; keep the default, dashboards depend on it |
-| `SERVICE_VERSION` | No | `1.0.0` | `service.version` resource attribute |
-| `PYROSCOPE_ADDR` | No | unset (profiling off) | Profiles use the Pyroscope SDK push protocol (**not** OTLP). Point it at Alloy (`http://alloy.monitoring.svc.cluster.local:4040`), which forwards to Pyroscope, or directly at Pyroscope. Profiling is on only when this is set and non-empty |
-| `ENABLE_PROFILING` | No | — | `0` forces profiling off even with `PYROSCOPE_ADDR` set; any other value (or unset) leaves the decision to `PYROSCOPE_ADDR` |
+| `SERVICE_VERSION` | No | `dev` | `service.version` resource attribute, the `version` log field and the Pyroscope `version` tag |
+| `SERVICE_COMMIT` | No | `unknown` | Commit id, logged once at start (`message: "starting"`); set it at deploy time |
+| `DEPLOYMENT_ENVIRONMENT` | No | `local` | `deployment.environment` resource attribute and the Pyroscope `environment` tag |
+| `LOG_LEVEL` | No | `info` | `debug`, `info`, `warning` (or `warn`) or `error`, case-insensitive; an unknown value means `info` |
+| `PYROSCOPE_ADDR` | No | unset (profiling off) | Profiles use the Pyroscope SDK push protocol (**not** OTLP): an absolute `http(s)://` URL, e.g. `http://pyroscope:4040`, or Alloy. There is no default address; profiling is on only when this is a valid URL. Tags: `service_name`, `version`, `environment` |
+| `ENABLE_PROFILING` | No | — | `0` forces profiling off even with `PYROSCOPE_ADDR` set; `1` alone starts nothing |
 
 Notes:
 
 - The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. The ranking calls have a 2 s deadline each (a constant, not configurable); the random fallback call has none.
 - Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
 - The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs go to stdout as JSON lines and, with telemetry on, are additionally exported over OTLP with trace ids.
-- With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `RecommendationService gRPC server started on port 8080 (telemetry off, profiling off)` (verified from source and in the image).
+- With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `{"message":"starting", ... "telemetry":"telemetry off, profiling off"}` (the lifecycle test runs the real server and checks them; not re-checked in the image).
 - With an endpoint set but no reachable collector, the exporters log retry errors to stderr and the service keeps serving.
 
 ## Container image
@@ -147,16 +150,18 @@ and was verified in the earlier local phase on a 3-node kind cluster (since dele
 |---|---|---|
 | **Traces** | OpenTelemetry SDK, `GrpcInstrumentorServer` and `GrpcInstrumentorClient` (so the catalog call is a child span), OTLP/gRPC exporter (`BatchSpanProcessor`); only when telemetry is on | Alloy `:4317` → Tempo |
 | **Metrics** | Hand-rolled RPC instruments, `PeriodicExportingMetricReader` over OTLP/gRPC every 15 s (replaces the Prometheus reader) | Alloy → Mimir |
-| **Logs** | Python `logging` with `python-json-logger` to stdout (always) **and** an OTel `LoggingHandler` (OTLP/gRPC, with trace ids; only when telemetry is on) | Alloy → Loki |
-| **Profiles** | `pyroscope-io`, tagged with `version`; only when profiling is on | Alloy `:4040` → Pyroscope |
+| **Logs** | Python `logging` with an own stdlib JSON formatter (`src/logsetup.py`) to stdout (always) **and** an OTel `LoggingHandler` (OTLP/gRPC, with trace ids; only when telemetry is on) | Alloy → Loki |
+| **Profiles** | `pyroscope-io`, tags `service_name`, `version`, `environment`; only when `PYROSCOPE_ADDR` is a valid URL | Alloy `:4040` → Pyroscope |
 
-Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). Each stdout line is one valid JSON object with the keys `timestamp` (epoch seconds), `severity`, `name`, `message` (quotes and newlines, e.g. in gRPC error texts, are escaped; a test asserts this).
+Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). Each stdout line is one valid JSON object (quotes and newlines, e.g. in gRPC error texts, are escaped; a test asserts this) with `timestamp` (RFC3339 UTC, milliseconds, e.g. `2026-11-13T10:00:00.123Z`), `severity` (`debug`, `info`, `warning`, `error`), `message`, `service`, `version`, `trace_id` and `span_id` (hex, only while a span is active, never empty or zero) and `error` (string, on errors). The former keys `name` and the epoch-float `timestamp` are gone. There is no `request_id` (this service has none). `LOG_LEVEL` sets the level. The `user_id` of a request is not logged (the frontend sends an account id or a session id there). Uncaught exceptions, also at import time or in a thread (e.g. `PRODUCT_CATALOG_SERVICE_ADDR` unset), are one JSON line (`message: "uncaught exception"`, `error`) and exit code 1, no traceback on stdout.
+
+Trace correlation: the handler runs inside the gRPC server span, so its log lines (and the ones of the catalog client call, which is a child client span) carry that span's `trace_id`/`span_id`; an incoming `traceparent` from the frontend continues the same trace (tested in-process with an in-memory exporter). With telemetry off there are no spans and no ids. Metrics stay OTLP-pushed RPC metrics; there is no scrape endpoint on purpose (the Go services serve `/metrics` on 9090, this service delivers RED metrics over OTLP). Resource attributes on every signal: `service.name`, `service.version`, `service.namespace=everly`, `deployment.environment`, `service.instance.id`.
 
 Every series carries `job="recommendation-service"` (from `service.name`) and `instance=<pod name>` (`service.instance.id`), which is what the Grafana dashboards select on. Logs land in Loki with `service_name="recommendation-service"` and trace/span ids, so a log line links to its trace.
 
 ## Running locally
 
-Requirements: Python 3.13 (see `.python-version`; 3.12 also works), Docker, a running `product-catalog-service` (or any gRPC stub on the configured address), [`grpcurl`](https://github.com/fullstorydev/grpcurl).
+Requirements: Python 3.12 (what the image runs; `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt`) or 3.13 (`.python-version`, what the lock was compiled for), Docker, a running `product-catalog-service` (or any gRPC stub on the configured address), [`grpcurl`](https://github.com/fullstorydev/grpcurl).
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
@@ -196,7 +201,8 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 ├── src/
 │   ├── server.py        # gRPC server (10-thread pool), RecommendationService + Health servicers, catalog client stub, random fallback, JSON logs, SIGTERM
 │   ├── ranking.py       # category/rating ranking, 60 s monotonic-clock cache of the catalog category lists
-│   ├── telemetry.py     # telemetry contract, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown; imported first
+│   ├── telemetry.py     # telemetry contract, resource attributes, OTel traces/metrics/logs (server + client instrumentation), Pyroscope, bounded shutdown
+│   ├── logsetup.py      # JSON log formatter (shared field set, trace ids), LOG_LEVEL, JSON excepthooks
 │   ├── generated/       # protoc output (git: only __init__.py; real stubs are built in Docker)
 │   └── __init__.py
 ├── proto/               # recommendation.proto, health.proto
@@ -205,6 +211,14 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 ├── Dockerfile / .dockerignore
 └── docs/                # empty placeholder
 ```
+
+## Verification status (observability step 3, 2026-11-13)
+
+| What | Result |
+|---|---|
+| `uv venv --python 3.12` (3.12.3), `uv pip install -r requirements.txt -r requirements-dev.txt`, stubs generated into `src/generated`, `pytest` | 130 passed. New: env matrix (endpoint, Pyroscope, resource attributes), log golden line and trace ids (in-process gRPC server with an in-memory exporter), JSON startup failure, malformed endpoint does not crash |
+| `uvx ruff check .` and `ruff format --check .` | clean |
+| NOT run | the image build, the compose stack, Tempo/Loki/Mimir/Pyroscope queries, telemetry ON against a real collector |
 
 ## Known limitations
 
