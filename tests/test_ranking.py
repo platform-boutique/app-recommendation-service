@@ -413,7 +413,7 @@ class TestServiceProcess:
         assert env.catalog.count("ListProducts") == 0
         code, records, stderr = svc.stop()
         assert code == 0
-        assert not [r for r in records if r["severity"] in ("WARNING", "ERROR")]
+        assert not [r for r in records if r["severity"] in ("warning", "error")]
         assert records[-1]["message"] == "RecommendationService stopped"
 
     def test_catalog_failure_falls_back_to_random_with_a_warning_and_no_error(self, service):
@@ -426,9 +426,9 @@ class TestServiceProcess:
         assert env.catalog.count("ListProducts") == 1
         code, records, _ = svc.stop()
         assert code == 0
-        warnings = [r for r in records if r["severity"] == "WARNING"]
+        warnings = [r for r in records if r["severity"] == "warning"]
         assert len(warnings) == 1 and "falling back to random" in warnings[0]["message"]
-        assert not [r for r in records if r["severity"] == "ERROR"]
+        assert not [r for r in records if r["severity"] == "error"]
 
     def test_fallback_result_varies(self, service):
         env, svc = service

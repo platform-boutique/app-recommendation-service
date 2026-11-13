@@ -54,8 +54,6 @@ protobuf==6.33.6
     #   opentelemetry-proto
 pyroscope-io==1.2.5
     # via -r requirements.in
-python-json-logger==4.2.0
-    # via -r requirements.in
 setuptools==84.2.1
     # via
     #   -r requirements.in

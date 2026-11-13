@@ -1,4 +1,5 @@
-# telemetry must be imported first to patch grpc before anything else
+# Logging comes first so that even an import error is reported as one JSON line; telemetry is imported before the
+# server is built so that it can patch grpc.
 import logging
 import os
 import random
@@ -7,31 +8,29 @@ import sys
 import threading
 from concurrent import futures
 
-import grpc
-from grpc_health.v1 import health_pb2, health_pb2_grpc
-from pythonjsonlogger.json import JsonFormatter
-
-import telemetry
-from generated import recommendation_pb2, recommendation_pb2_grpc
-from ranking import Ranker
-from telemetry import start_rpc_metrics  # noqa: F401, E402
+import logsetup
 
 # ---------------------------------------------------------------------------
 # Logger
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("recommendation-service")
-handler = logging.StreamHandler(sys.stdout)
-# One valid JSON object per line (quotes and newlines in messages are escaped); same keys as before.
-handler.setFormatter(
-    JsonFormatter(
-        ["created", "levelname", "name", "message"],
-        rename_fields={"created": "timestamp", "levelname": "severity"},
-    )
+handler = logsetup.make_handler(
+    os.environ.get("OTEL_SERVICE_NAME", "").strip() or "recommendation-service",
+    os.environ.get("SERVICE_VERSION", "").strip() or "dev",
 )
 logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger.setLevel(logsetup.log_level(os.environ))
 logger.propagate = False
+logsetup.install_excepthooks(logger)
+
+import grpc  # noqa: E402
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # noqa: E402
+
+import telemetry  # noqa: E402
+from generated import recommendation_pb2, recommendation_pb2_grpc  # noqa: E402
+from ranking import Ranker  # noqa: E402
+from telemetry import start_rpc_metrics  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
 # ProductCatalog gRPC client (upstream dependency)
@@ -64,7 +63,9 @@ class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServic
         try:
             return self._ranker.recommend(request.product_ids)
         except Exception as err:  # any catalog trouble: the caller still gets recommendations
-            logger.warning(f"Ranked recommendations unavailable, falling back to random picks: {err!r}")
+            logger.warning(
+                "Ranked recommendations unavailable, falling back to random picks", extra={"error": repr(err)}
+            )
             return None
 
     def _random_pick(self, owned_ids):
@@ -82,7 +83,8 @@ class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServic
             if recommended is None:
                 recommended = self._random_pick(request.product_ids)
 
-            logger.info(f"ListRecommendations user_id={request.user_id} returning product_ids={recommended}")
+            # The user id is not logged: the frontend sends the account id or the session id there.
+            logger.info(f"ListRecommendations returning {len(recommended)} product_ids={recommended}")
 
             response = recommendation_pb2.ListRecommendationsResponse()
             response.product_ids.extend(recommended)
@@ -90,14 +92,14 @@ class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServic
             return response
 
         except grpc.RpcError as err:
-            logger.error(f"ProductCatalog RPC failed: {err}")
+            logger.error("ProductCatalog RPC failed", extra={"error": str(err)})
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("Failed to fetch product catalog.")
             end_metrics("13")  # INTERNAL
             return recommendation_pb2.ListRecommendationsResponse()
 
         except Exception as err:
-            logger.error(f"ListRecommendations failed: {err}")
+            logger.error("ListRecommendations failed", extra={"error": str(err)})
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("An unexpected error occurred.")
             end_metrics("13")  # INTERNAL
@@ -154,7 +156,16 @@ def main() -> int:
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()
-    logger.info(f"RecommendationService gRPC server started on port {port} ({telemetry.describe()})")
+    logger.info(
+        "starting",
+        extra={
+            "fields": {
+                "commit": telemetry.service_commit(os.environ),
+                "port": port,
+                "telemetry": telemetry.describe(),
+            }
+        },
+    )
 
     stop_event.wait()
     shutdown(server)
