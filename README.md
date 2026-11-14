@@ -38,7 +38,7 @@ The frontend then keeps at most 4 of the returned IDs and fetches each product f
 4. **Cache.** The candidate list of each category (and of the whole shop) is cached in memory for **60 s**, measured on a monotonic clock (`time.monotonic`; the host's wall clock can jump by tens of seconds). The `GetProduct` lookups are not cached. A failed fetch is never cached. The cache is per process (replicas do not share it), so a catalog change shows up after at most 60 s.
 5. **Fallback.** If anything in steps 1-3 fails (catalog down, deadline of 2 s per call exceeded, an older catalog without `ListProductsFiltered`, any other error) the service logs one `WARNING` ("Ranked recommendations unavailable, falling back to random picks: ...") and answers with the **old behaviour**: `ListProducts`, remove the given ids, random sample of up to 5. The caller sees a normal response. Only when that old call fails as well does the caller get `INTERNAL`, as before.
 
-Verified: unit/integration tests (88, all green, `ruff check`/`ruff format --check` clean) and a container smoke test on a throwaway docker network against a fake catalog gRPC server (ranked answers for a viewed product, two categories, no ids and an unknown id; with the catalog stopped the cached whole-shop list kept answering and the uncached requests ended in `INTERNAL` because the random fallback needs the catalog too). The catalog-down random fallback with a *working* `ListProducts` is covered by the tests that run the real `server.py`; it was not run in a container, and nothing was run against the real compose catalog.
+Verified: unit/integration tests (88 when this was written, 130 on 2026-11-14, all green, `ruff check`/`ruff format --check` clean) and a container smoke test on a throwaway docker network against a fake catalog gRPC server (ranked answers for a viewed product, two categories, no ids and an unknown id; with the catalog stopped the cached whole-shop list kept answering and the uncached requests ended in `INTERNAL` because the random fallback needs the catalog too). The catalog-down random fallback with a *working* `ListProducts` is covered by the tests that run the real `server.py`; it was not run in a container, and nothing was run against the real compose catalog.
 
 Edge cases: a category with no other product than the viewed one yields an empty list (there is no top-up from the whole shop); the 150-product limit per category means that in a larger category ties on rating at the page boundary are cut in the catalog's name order, not by review count.
 
@@ -218,7 +218,8 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 |---|---|
 | `uv venv --python 3.12` (3.12.3), `uv pip install -r requirements.txt -r requirements-dev.txt`, stubs generated into `src/generated`, `pytest` | 130 passed. New: env matrix (endpoint, Pyroscope, resource attributes), log golden line and trace ids (in-process gRPC server with an in-memory exporter), JSON startup failure, malformed endpoint does not crash |
 | `uvx ruff check .` and `ruff format --check .` | clean |
-| NOT run | the image build, the compose stack, Tempo/Loki/Mimir/Pyroscope queries, telemetry ON against a real collector |
+| Rollout prep 2026-11-14, merged head (origin/main merged in): same venv recipe, `pytest`; `ruff check .` / `ruff format --check .`; `docker build` (image runs as `10001:10001`, then removed) | 130 passed; ruff clean; build ok |
+| NOT run | the compose stack, Tempo/Loki/Mimir/Pyroscope queries, telemetry ON against a real collector |
 
 ## Known limitations
 
