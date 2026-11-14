@@ -223,6 +223,28 @@ class TestCatalogCalls:
             e.close()
         assert seen == [ranking.CATALOG_TIMEOUT_SECONDS] * 2
 
+    def test_the_deadline_is_configurable(self, stubs):
+        seen = []
+
+        class Spy:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def GetProduct(self, req, **kw):
+                seen.append(kw.get("timeout"))
+                return self.inner.GetProduct(req, **kw)
+
+            def ListProductsFiltered(self, req, **kw):
+                seen.append(kw.get("timeout"))
+                return self.inner.ListProductsFiltered(req, **kw)
+
+        e = Env(stubs)
+        try:
+            ranking.Ranker(Spy(e.stub), e.pb2, timeout=0.25).recommend(["T1"])
+        finally:
+            e.close()
+        assert seen == [0.25] * 2
+
 
 # ---------------------------------------------------------------------------
 # Cache
@@ -364,11 +386,12 @@ def app_dir(tmp_path_factory):
 class RunningService:
     """The real server.py in a subprocess, pointed at the fake catalog."""
 
-    def __init__(self, app_dir, catalog_addr, stubs):
+    def __init__(self, app_dir, catalog_addr, stubs, extra_env=None):
         self.pb2, self.pb2_grpc = stubs
         self.port = _free_port()
         env = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "PYROSCOPE", "ENABLE_"))}
         env.update(PORT=str(self.port), PRODUCT_CATALOG_SERVICE_ADDR=catalog_addr, PYTHONUNBUFFERED="1")
+        env.update(extra_env or {})
         self.proc = subprocess.Popen(
             [sys.executable, "src/server.py"],
             cwd=app_dir,
@@ -453,3 +476,52 @@ class TestServiceProcess:
             svc.recommend(["T1"])
         assert err.value.code() == grpc.StatusCode.INTERNAL
         svc.stop()
+
+
+class TestCatalogTimeout:
+    """CODE-05: every catalog call has a deadline, including the ListProducts of the random fallback."""
+
+    def test_the_timeout_comes_from_the_environment_and_a_bad_value_means_the_default(self):
+        default = ranking.CATALOG_TIMEOUT_SECONDS
+        cases = {
+            None: default,
+            "": default,
+            "abc": default,
+            "nan": default,
+            "inf": default,
+            "-1": default,
+            "0": default,
+            "0.05": default,
+            "31": default,
+            "0.1": 0.1,
+            " 0.5 ": 0.5,
+            "30": 30.0,
+        }
+        for raw, want in cases.items():
+            env = {} if raw is None else {"CATALOG_TIMEOUT_SECONDS": raw}
+            assert ranking.catalog_timeout(env) == want, raw
+
+    def test_a_hanging_list_products_ends_in_internal_instead_of_waiting_for_the_caller(self, stubs, app_dir):
+        e = Env(stubs)
+        svc = RunningService(app_dir, e.addr, stubs, extra_env={"CATALOG_TIMEOUT_SECONDS": "0.5"})
+        try:
+            # the ranking calls fail at once, so the random fallback runs, and its ListProducts never answers
+            e.catalog.fail_with = grpc.StatusCode.UNAVAILABLE
+            e.catalog.hang_list_products = True
+            with pytest.raises(grpc.RpcError) as err:
+                svc.recommend(["T1"])  # the caller allows 10 s; the service must answer on its own deadline
+            assert err.value.code() == grpc.StatusCode.INTERNAL
+            assert err.value.details() == "Failed to fetch product catalog."
+            assert e.catalog.count("ListProducts") == 1
+            code, records, _ = svc.stop()
+            assert code == 0
+            failed = [r for r in records if r["message"] == "ProductCatalog RPC failed"]
+            assert len(failed) == 1 and "DEADLINE_EXCEEDED" in failed[0]["error"]
+            start = [r for r in records if r["message"] == "starting"][0]
+            assert start["catalog_timeout_seconds"] == 0.5
+        finally:
+            e.catalog.release.set()
+            if svc.proc.poll() is None:
+                svc.proc.kill()
+                svc.proc.communicate()
+            e.close()

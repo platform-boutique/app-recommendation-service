@@ -29,7 +29,7 @@ from grpc_health.v1 import health_pb2, health_pb2_grpc  # noqa: E402
 
 import telemetry  # noqa: E402
 from generated import recommendation_pb2, recommendation_pb2_grpc  # noqa: E402
-from ranking import Ranker  # noqa: E402
+from ranking import CATALOG_TIMEOUT_SECONDS, Ranker, catalog_timeout  # noqa: E402
 from telemetry import start_rpc_metrics  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
@@ -54,9 +54,14 @@ def _build_product_catalog_stub() -> recommendation_pb2_grpc.ProductCatalogServi
 class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServiceServicer):
     MAX_RESPONSES = 5
 
-    def __init__(self, product_catalog_stub, ranker=None):
+    def __init__(self, product_catalog_stub, ranker=None, catalog_timeout_seconds=CATALOG_TIMEOUT_SECONDS):
         self._catalog = product_catalog_stub
-        self._ranker = ranker if ranker is not None else Ranker(product_catalog_stub, recommendation_pb2)
+        self._timeout = catalog_timeout_seconds
+        self._ranker = (
+            ranker
+            if ranker is not None
+            else Ranker(product_catalog_stub, recommendation_pb2, timeout=catalog_timeout_seconds)
+        )
 
     def _rank(self, request):
         """Ranked ids (categories of the viewed products, rating desc), or None if the catalog cannot answer."""
@@ -70,7 +75,7 @@ class RecommendationServiceServicer(recommendation_pb2_grpc.RecommendationServic
 
     def _random_pick(self, owned_ids):
         """The original behaviour: random sample of the whole catalog minus the given ids."""
-        cat_response = self._catalog.ListProducts(recommendation_pb2.Empty())
+        cat_response = self._catalog.ListProducts(recommendation_pb2.Empty(), timeout=self._timeout)
         all_ids = [p.id for p in cat_response.products]
         candidates = list(set(all_ids) - set(owned_ids))
         num_return = min(self.MAX_RESPONSES, len(candidates))
@@ -147,10 +152,11 @@ def main() -> int:
     install_signal_handlers(stop_event)
 
     product_catalog_stub = _build_product_catalog_stub()
+    timeout = catalog_timeout(os.environ)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     recommendation_pb2_grpc.add_RecommendationServiceServicer_to_server(
-        RecommendationServiceServicer(product_catalog_stub), server
+        RecommendationServiceServicer(product_catalog_stub, catalog_timeout_seconds=timeout), server
     )
     health_pb2_grpc.add_HealthServicer_to_server(HealthServicer(), server)
 
@@ -162,6 +168,7 @@ def main() -> int:
             "fields": {
                 "commit": telemetry.service_commit(os.environ),
                 "port": port,
+                "catalog_timeout_seconds": timeout,
                 "telemetry": telemetry.describe(),
             }
         },

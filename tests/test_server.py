@@ -134,6 +134,16 @@ class TestListRecommendations_HappyPath:
         mock_grpc_context.set_code.assert_not_called()
         mock_grpc_context.set_details.assert_not_called()
 
+    def test_random_fallback_call_has_the_configured_deadline(self, catalog_stub, valid_request, mock_grpc_context):
+        server.RecommendationServiceServicer(catalog_stub, catalog_timeout_seconds=0.75).ListRecommendations(
+            valid_request, mock_grpc_context
+        )
+        assert catalog_stub.ListProducts.call_args.kwargs["timeout"] == 0.75
+
+    def test_random_fallback_call_has_a_deadline_by_default(self, catalog_stub, valid_request, mock_grpc_context):
+        _make_servicer(catalog_stub).ListRecommendations(valid_request, mock_grpc_context)
+        assert catalog_stub.ListProducts.call_args.kwargs["timeout"] == server.CATALOG_TIMEOUT_SECONDS > 0
+
     def test_calls_catalog_list_products(self, catalog_stub, valid_request, mock_grpc_context):
         servicer = _make_servicer(catalog_stub)
         servicer.ListRecommendations(valid_request, mock_grpc_context)

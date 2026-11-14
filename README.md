@@ -47,6 +47,7 @@ Edge cases: a category with no other product than the viewed one yields an empty
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PRODUCT_CATALOG_SERVICE_ADDR` | **Yes** | — | `host:port` (no scheme) of product-catalog gRPC. **The process exits at startup with `RuntimeError` if unset** |
+| `CATALOG_TIMEOUT_SECONDS` | No | `2` | Deadline in seconds of EVERY product-catalog call: the ranking calls (`GetProduct`, `ListProductsFiltered`) and the `ListProducts` of the random fallback. A number from 0.1 to 30; unset, empty, not a number, `nan`/`inf` or out of range means 2 (a typo never removes the deadline). A fallback call that hits the deadline ends the RPC with `INTERNAL` ("Failed to fetch product catalog."). The value is logged in the `starting` line as `catalog_timeout_seconds` |
 | `PORT` | No | `8080` | gRPC listen port |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs**: an absolute `http(s)://host:port` URL, e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Telemetry is on only when this is a valid URL; empty or malformed means off (never a crash). The old `COLLECTOR_SERVICE_ADDR` and `ENABLE_TRACING` are no longer read |
 | `OTEL_SDK_DISABLED` | No | — | `true` (trimmed, any case) forces everything off: telemetry and profiling, even with an endpoint set |
