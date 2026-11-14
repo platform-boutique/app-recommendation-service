@@ -26,7 +26,7 @@ docker run --rm -p 8081:8080 \
   -e PRODUCT_CATALOG_SERVICE_ADDR=host.docker.internal:3550 recommendation-service
 ```
 
-### Manual gRPC testing (no reflection — pass the proto)
+### Manual gRPC testing (reflection is on; `-proto` also works)
 
 ```bash
 grpcurl -plaintext -proto proto/recommendation.proto \

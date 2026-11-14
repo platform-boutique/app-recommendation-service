@@ -11,12 +11,12 @@ Part of the [platform-demo](https://github.com/platform-boutique) platform — m
 | **Language / runtime** | Python 3.12 in the image (3.13 pinned for local dev), `grpcio` |
 | **Image** | `mladenovskistefan/recommendation-service` |
 | **Protocol / port** | gRPC (HTTP/2, plaintext) on `8080` |
-| **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests` |
+| **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests`, `build_info`, `python_*` runtime metrics |
 | **Health** | `grpc.health.v1.Health/Check` on `8080` — static `SERVING`, does **not** reflect catalog availability |
 | **State** | None |
 | **Depends on** | `product-catalog-service:3550` (`GetProduct`, `ListProductsFiltered`; `ListProducts` only for the random fallback) |
 | **Called by** | `frontend` (`ListRecommendations`) |
-| **gRPC reflection** | Not enabled — pass `-proto` to `grpcurl` |
+| **gRPC reflection** | Enabled (`grpcio-reflection`, v1alpha): `grpcurl -plaintext localhost:8080 list` works without the proto files |
 
 ## API
 
@@ -80,7 +80,7 @@ Multi-stage [`Dockerfile`](Dockerfile):
 - **Entrypoint:** `python src/server.py` (working dir `/app`).
 - **User:** numeric `USER 10001:10001` (`appuser`/`appgroup`, created with these fixed ids; `id` in the container prints `uid=10001(appuser) gid=10001(appgroup)`). Build args `SERVICE_VERSION` (default `dev`) and `SERVICE_COMMIT` (default `unknown`) set the OCI labels `version`/`revision` (plus `source`, `licenses=Apache-2.0`) and the ENV of the same names.
 - **EXPOSE:** `8080` only.
-- **Docker `HEALTHCHECK`:** Python `grpc.channel_ready_future` against `localhost:${PORT:-8080}`.
+- **Docker `HEALTHCHECK`:** exec form (no shell): Python `grpc.channel_ready_future` against `localhost:$PORT`, 8080 when `PORT` is unset or empty.
 - **Image size:** 175 MB uncompressed (`docker images`, local build on 2026-10-27; the earlier ~41 MB figure was not re-measured and is probably the compressed registry size).
 - **Reproducibility:** the image installs from the fully pinned `requirements.txt` (compiled from `requirements.in` with `uv`), so transitive versions no longer float between builds. The lock was not regenerated in this change.
 - **Build context:** [`.dockerignore`](.dockerignore) keeps `.git`, tests, docs, caches and locally compiled stubs out of the context.
@@ -154,7 +154,7 @@ and was verified in the earlier local phase on a 3-node kind cluster (since dele
 | **Logs** | Python `logging` with an own stdlib JSON formatter (`src/logsetup.py`) to stdout (always) **and** an OTel `LoggingHandler` (OTLP/gRPC, with trace ids; only when telemetry is on) | Alloy → Loki |
 | **Profiles** | `pyroscope-io`, tags `service_name`, `version`, `environment`; only when `PYROSCOPE_ADDR` is a valid URL | Alloy `:4040` → Pyroscope |
 
-Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). Each stdout line is one valid JSON object (quotes and newlines, e.g. in gRPC error texts, are escaped; a test asserts this) with `timestamp` (RFC3339 UTC, milliseconds, e.g. `2026-11-13T10:00:00.123Z`), `severity` (`debug`, `info`, `warning`, `error`), `message`, `service`, `version`, `trace_id` and `span_id` (hex, only while a span is active, never empty or zero) and `error` (string, on errors). The former keys `name` and the epoch-float `timestamp` are gone. There is no `request_id` (this service has none). `LOG_LEVEL` sets the level. The `user_id` of a request is not logged (the frontend sends an account id or a session id there). Uncaught exceptions, also at import time or in a thread (e.g. `PRODUCT_CATALOG_SERVICE_ADDR` unset), are one JSON line (`message: "uncaught exception"`, `error`) and exit code 1, no traceback on stdout.
+Metric names: `rpc_server_duration_seconds_{bucket,count,sum}` (buckets 1 ms … 10 s; the unit `s` yields `_seconds`), `rpc_server_requests_total`, `rpc_server_active_requests` (labels `rpc_system`, `rpc_service`, `rpc_method`, `rpc_grpc_status_code`). `build_info{service,version,commit}` is always 1 (version and commit from `SERVICE_VERSION` / `SERVICE_COMMIT`, `dev` / `unknown` when unset). Runtime metrics (standard library only): `python_process_resident_memory_bytes`, `python_process_cpu_seconds_total`, `python_process_uptime_seconds`, `python_process_open_fds`, `python_threads`, `python_gc_collections_total{generation}`, `python_gc_objects_collected_total{generation}`. Each stdout line is one valid JSON object (quotes and newlines, e.g. in gRPC error texts, are escaped; a test asserts this) with `timestamp` (RFC3339 UTC, milliseconds, e.g. `2026-11-13T10:00:00.123Z`), `severity` (`debug`, `info`, `warning`, `error`), `message`, `service`, `version`, `trace_id` and `span_id` (hex, only while a span is active, never empty or zero) and `error` (string, on errors). The former keys `name` and the epoch-float `timestamp` are gone. There is no `request_id` (this service has none). `LOG_LEVEL` sets the level. The `user_id` of a request is not logged (the frontend sends an account id or a session id there). Uncaught exceptions, also at import time or in a thread (e.g. `PRODUCT_CATALOG_SERVICE_ADDR` unset), are one JSON line (`message: "uncaught exception"`, `error`) and exit code 1, no traceback on stdout.
 
 Trace correlation: the handler runs inside the gRPC server span, so its log lines (and the ones of the catalog client call, which is a child client span) carry that span's `trace_id`/`span_id`; an incoming `traceparent` from the frontend continues the same trace (tested in-process with an in-memory exporter). With telemetry off there are no spans and no ids. Metrics stay OTLP-pushed RPC metrics; there is no scrape endpoint on purpose (the Go services serve `/metrics` on 9090, this service delivers RED metrics over OTLP). Resource attributes on every signal: `service.name`, `service.version`, `service.namespace=everly`, `deployment.environment`, `service.instance.id`.
 
@@ -186,7 +186,7 @@ docker run --rm -p 8081:8080 \
   -e PRODUCT_CATALOG_SERVICE_ADDR=host.docker.internal:3550 recommendation-service
 ```
 
-### Manual gRPC testing (no reflection — pass the proto)
+### Manual gRPC testing (reflection is on; `-proto` also works)
 
 ```bash
 grpcurl -plaintext -proto proto/recommendation.proto \

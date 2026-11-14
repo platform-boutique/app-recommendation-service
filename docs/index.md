@@ -32,12 +32,12 @@ flowchart LR
 | **Language / runtime** | Python 3.12 in the image (3.13 pinned for local dev), `grpcio` |
 | **Image** | `mladenovskistefan/recommendation-service` |
 | **Protocol / port** | gRPC (HTTP/2, plaintext) on `8080` |
-| **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests` |
+| **Metrics** | Pushed over OTLP/gRPC to Alloy → Mimir every 15 s (no scrape endpoint). Dashboard names: `rpc_server_duration_seconds_{bucket,count,sum}`, `rpc_server_requests_total`, `rpc_server_active_requests`, `build_info`, `python_*` runtime metrics |
 | **Health** | `grpc.health.v1.Health/Check` on `8080` — static `SERVING`, does **not** reflect catalog availability |
 | **State** | None |
 | **Depends on** | `product-catalog-service:3550` (`GetProduct`, `ListProductsFiltered`; `ListProducts` only for the random fallback) |
 | **Called by** | `frontend` (`ListRecommendations`) |
-| **gRPC reflection** | Not enabled — pass `-proto` to `grpcurl` |
+| **gRPC reflection** | Enabled (`grpcio-reflection`, v1alpha): `grpcurl -plaintext localhost:8080 list` works without the proto files |
 
 ## Find it elsewhere
 

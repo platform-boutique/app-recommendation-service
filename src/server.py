@@ -26,6 +26,7 @@ logsetup.install_excepthooks(logger)
 
 import grpc  # noqa: E402
 from grpc_health.v1 import health_pb2, health_pb2_grpc  # noqa: E402
+from grpc_reflection.v1alpha import reflection  # noqa: E402
 
 import telemetry  # noqa: E402
 from generated import recommendation_pb2, recommendation_pb2_grpc  # noqa: E402
@@ -128,6 +129,16 @@ class HealthServicer(health_pb2_grpc.HealthServicer):
 SHUTDOWN_GRACE_SECONDS = 2
 
 
+def enable_reflection(server) -> None:
+    """gRPC server reflection (CODE-02), so grpcurl works without the .proto files."""
+    names = (
+        recommendation_pb2.DESCRIPTOR.services_by_name["RecommendationService"].full_name,
+        health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
+        reflection.SERVICE_NAME,
+    )
+    reflection.enable_server_reflection(names, server)
+
+
 def install_signal_handlers(stop_event: threading.Event) -> None:
     """SIGTERM/SIGINT set stop_event. Needed because PID 1 in a container ignores signals without a handler."""
 
@@ -159,6 +170,7 @@ def main() -> int:
         RecommendationServiceServicer(product_catalog_stub, catalog_timeout_seconds=timeout), server
     )
     health_pb2_grpc.add_HealthServicer_to_server(HealthServicer(), server)
+    enable_reflection(server)
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()
