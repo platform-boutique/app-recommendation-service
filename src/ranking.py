@@ -25,10 +25,26 @@ PAGE_SIZE = 50
 MAX_PAGES = 3
 # The cart can hold many lines; only the first MAX_LOOKUPS distinct ids are resolved to categories.
 MAX_LOOKUPS = 10
-# Deadline of every catalog call made by the ranking path; a hanging catalog then ends in the random fallback.
+# Default deadline of every catalog call (ranking path and random fallback); a hanging catalog then ends in the random
+# fallback, and a hanging fallback call ends in INTERNAL. CATALOG_TIMEOUT_SECONDS in the environment overrides it.
 CATALOG_TIMEOUT_SECONDS = 2.0
+MIN_CATALOG_TIMEOUT_SECONDS = 0.1
+MAX_CATALOG_TIMEOUT_SECONDS = 30.0
 
 ALL_PRODUCTS = ""  # cache key / department filter meaning "the whole shop"
+
+
+def catalog_timeout(env) -> float:
+    """CATALOG_TIMEOUT_SECONDS from the environment: a number of seconds in [0.1, 30]. Anything else (unset, empty, not
+    a number, nan, out of range) means the default, so a typo never removes the deadline."""
+    raw = (env.get("CATALOG_TIMEOUT_SECONDS") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return CATALOG_TIMEOUT_SECONDS
+    if not MIN_CATALOG_TIMEOUT_SECONDS <= value <= MAX_CATALOG_TIMEOUT_SECONDS:  # False for nan too
+        return CATALOG_TIMEOUT_SECONDS
+    return value
 
 
 class Candidate(NamedTuple):
@@ -42,11 +58,14 @@ def rank_key(c: Candidate):
 
 
 class Ranker:
-    def __init__(self, catalog_stub, pb2, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self, catalog_stub, pb2, clock: Callable[[], float] = time.monotonic, timeout: float = CATALOG_TIMEOUT_SECONDS
+    ):
         """`pb2` is the generated recommendation_pb2 module (injected so tests can pass their own)."""
         self._catalog = catalog_stub
         self._pb2 = pb2
         self._clock = clock
+        self._timeout = timeout
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
 
@@ -73,7 +92,7 @@ class Ranker:
         departments: dict[str, None] = {}
         for pid in product_ids:
             try:
-                product = self._catalog.GetProduct(self._pb2.GetProductRequest(id=pid), timeout=CATALOG_TIMEOUT_SECONDS)
+                product = self._catalog.GetProduct(self._pb2.GetProductRequest(id=pid), timeout=self._timeout)
             except grpc.RpcError as err:
                 if _code(err) == grpc.StatusCode.NOT_FOUND:
                     continue
@@ -105,7 +124,7 @@ class Ranker:
                     page=page,
                     page_size=PAGE_SIZE,
                 ),
-                timeout=CATALOG_TIMEOUT_SECONDS,
+                timeout=self._timeout,
             )
             out.extend(Candidate(p.id, p.rating, p.review_count) for p in resp.products)
             if len(resp.products) < PAGE_SIZE or (resp.total and len(out) >= resp.total):

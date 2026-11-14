@@ -7,6 +7,7 @@ under private names and never left in sys.modules, because test_server.py stubs 
 
 import subprocess
 import sys
+import threading
 from concurrent import futures
 from pathlib import Path
 
@@ -57,6 +58,8 @@ def make_fake_catalog(pb2, pb2_grpc, products):
             self.calls = []  # (method, request)
             self.fail_with = None  # grpc.StatusCode: every call except ListProducts aborts with it
             self.fail_list_products = False
+            self.hang_list_products = False  # ListProducts does not answer until `release` is set
+            self.release = threading.Event()
 
         def GetProduct(self, request, context):
             self.calls.append(("GetProduct", request))
@@ -82,6 +85,8 @@ def make_fake_catalog(pb2, pb2_grpc, products):
 
         def ListProducts(self, request, context):
             self.calls.append(("ListProducts", request))
+            if self.hang_list_products:
+                self.release.wait(60)  # test teardown sets `release`; 60 s is only a safety net for a forgotten one
             if self.fail_list_products:
                 context.abort(grpc.StatusCode.UNAVAILABLE, "injected")
             return pb2.ListProductsResponse(products=self.products)
