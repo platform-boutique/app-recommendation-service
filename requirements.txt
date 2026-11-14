@@ -8,9 +8,9 @@ grpcio==1.85.1
     #   grpcio-health-checking
     #   grpcio-tools
     #   opentelemetry-exporter-otlp-proto-grpc
-grpcio-health-checking==1.81.1
+grpcio-health-checking==1.81.2
     # via -r requirements.in
-grpcio-tools==1.81.1
+grpcio-tools==1.81.2
     # via -r requirements.in
 opentelemetry-api==1.45.2
     # via
@@ -54,10 +54,6 @@ protobuf==6.33.6
     #   opentelemetry-proto
 pyroscope-io==1.4.0
     # via -r requirements.in
-setuptools==84.2.1
-    # via
-    #   -r requirements.in
-    #   grpcio-tools
 typing-extensions==4.15.0
     # via
     #   grpcio
