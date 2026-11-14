@@ -74,10 +74,10 @@ Multi-stage [`Dockerfile`](Dockerfile):
 | Stage | Base | What happens |
 |---|---|---|
 | builder | `python:3.12-alpine` | installs `g++`/`linux-headers`, `pip install -r requirements.txt` (fully pinned), **compiles the protos** with `grpc_tools.protoc` into `generated/` and patches the relative import in `recommendation_pb2_grpc.py` |
-| runtime | `python:3.12-alpine` | copies site-packages, generated stubs (`/app/src/generated`), `src/`; runs as non-root |
+| runtime | `python:3.12-alpine` | copies site-packages, generated stubs (`/app/src/generated`), `src/`; runs as `10001:10001` |
 
 - **Entrypoint:** `python src/server.py` (working dir `/app`).
-- **User:** numeric `USER 100:101` (`appuser`/`appgroup`, created with these fixed ids; `id` in the container prints `uid=100(appuser) gid=101(appgroup)`). Matches the chart's `runAsUser: 100` / `runAsGroup: 101`.
+- **User:** numeric `USER 10001:10001` (`appuser`/`appgroup`, created with these fixed ids; `id` in the container prints `uid=10001(appuser) gid=10001(appgroup)`). Build args `SERVICE_VERSION` (default `dev`) and `SERVICE_COMMIT` (default `unknown`) set the OCI labels `version`/`revision` (plus `source`, `licenses=Apache-2.0`) and the ENV of the same names.
 - **EXPOSE:** `8080` only.
 - **Docker `HEALTHCHECK`:** Python `grpc.channel_ready_future` against `localhost:${PORT:-8080}`.
 - **Image size:** 175 MB uncompressed (`docker images`, local build on 2026-10-27; the earlier ~41 MB figure was not re-measured and is probably the compressed registry size).
@@ -119,7 +119,7 @@ livenessProbe:
 ```yaml
 securityContext:
   runAsNonRoot: true
-  runAsUser: 100
+  runAsUser: 10001
   runAsGroup: 101
   allowPrivilegeEscalation: false
   capabilities: { drop: ["ALL"] }
