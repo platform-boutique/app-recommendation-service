@@ -289,12 +289,14 @@ def rec_logger():
 
 
 class TestListRecommendations_Logging:
-    def test_logs_user_id_on_success(self, catalog_stub, mock_grpc_context, rec_logger, make_request):
+    def test_logs_the_result_but_not_the_user_id(self, catalog_stub, mock_grpc_context, rec_logger, make_request):
+        """The frontend sends the account id or the session id as user_id: it stays out of the logs."""
         servicer = _make_servicer(catalog_stub)
         req = make_request(user_id="user-logged-999")
         servicer.ListRecommendations(req, mock_grpc_context)
         messages = [r.getMessage() for r in rec_logger]
-        assert any("user-logged-999" in m for m in messages)
+        assert any("ListRecommendations returning" in m and "product_ids=" in m for m in messages)
+        assert not any("user-logged-999" in m for m in messages)
 
     def test_logs_error_on_catalog_failure(self, mock_grpc_context, make_catalog, make_request, rec_logger):
         stub = make_catalog()

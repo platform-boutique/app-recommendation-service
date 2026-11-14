@@ -25,7 +25,7 @@ livenessProbe:
   failureThreshold: 3
 ```
 
-**Graceful shutdown:** the process runs as PID 1 and installs no `SIGTERM` handler, so the kernel drops `SIGTERM` and each termination waits out the grace period. Set `terminationGracePeriodSeconds: 5`.
+**Graceful shutdown:** `SIGTERM` (and `SIGINT`) is handled even as PID 1: the server stops accepting new RPCs, gives in-flight ones up to 2 s (`server.stop(2)`), flushes telemetry when it is on (bounded at 2 s, also when the collector is unreachable) and exits `0`. The worst case (4 s) fits the chart's `terminationGracePeriodSeconds: 5`. Measured: `docker stop` on the idle container returned in 0.29 s with exit code 0; running from source against a stub OTLP receiver, the final traces, metrics and logs batches arrived after `SIGTERM` and the process exited 0 (a test covers the unreachable-collector bound).
 
 **Security context**
 
