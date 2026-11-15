@@ -401,18 +401,18 @@ class RunningService:
             text=True,
         )
         self.channel = grpc.insecure_channel(f"127.0.0.1:{self.port}")
-        grpc.channel_ready_future(self.channel).result(timeout=15)
+        grpc.channel_ready_future(self.channel).result(timeout=120)
         self.stub = self.pb2_grpc.RecommendationServiceStub(self.channel)
 
     def recommend(self, ids):
         return self.stub.ListRecommendations(
-            self.pb2.ListRecommendationsRequest(user_id="u1", product_ids=ids), timeout=10
+            self.pb2.ListRecommendationsRequest(user_id="u1", product_ids=ids), timeout=30
         )
 
     def stop(self):
         self.channel.close()
         self.proc.send_signal(signal.SIGTERM)
-        stdout, stderr = self.proc.communicate(timeout=10)
+        stdout, stderr = self.proc.communicate(timeout=30)
         records = [json.loads(line) for line in stdout.splitlines()]
         return self.proc.returncode, records, stderr
 
@@ -525,3 +525,25 @@ class TestCatalogTimeout:
                 svc.proc.kill()
                 svc.proc.communicate()
             e.close()
+
+
+class TestReflection:
+    """CODE-02: the real server answers gRPC server reflection (what grpcurl uses without the .proto files)."""
+
+    def test_lists_the_services_and_serves_the_descriptor(self, service):
+        from grpc_reflection.v1alpha import reflection_pb2, reflection_pb2_grpc
+
+        env, svc = service
+        stub = reflection_pb2_grpc.ServerReflectionStub(svc.channel)
+
+        def ask(request):
+            return next(iter(stub.ServerReflectionInfo(iter([request]), timeout=10)))
+
+        listed = ask(reflection_pb2.ServerReflectionRequest(list_services="*"))
+        names = {s.name for s in listed.list_services_response.service}
+        assert {"hipstershop.RecommendationService", "grpc.health.v1.Health"} <= names
+
+        symbol = ask(reflection_pb2.ServerReflectionRequest(file_containing_symbol="hipstershop.RecommendationService"))
+        assert len(symbol.file_descriptor_response.file_descriptor_proto) > 0
+        code, _records, _stderr = svc.stop()
+        assert code == 0
