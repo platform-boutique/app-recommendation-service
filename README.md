@@ -62,7 +62,7 @@ Edge cases: a category with no other product than the viewed one yields an empty
 
 Notes:
 
-- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. The ranking calls have a 2 s deadline each (a constant, not configurable); the random fallback call has none.
+- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. Every catalog call, the random fallback included, has the deadline `CATALOG_TIMEOUT_SECONDS` (default 2 s).
 - Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
 - The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs go to stdout as JSON lines and, with telemetry on, are additionally exported over OTLP with trace ids.
 - With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `{"message":"starting", ... "telemetry":"telemetry off, profiling off"}` (the lifecycle test runs the real server and checks them; not re-checked in the image).
@@ -121,7 +121,7 @@ livenessProbe:
 securityContext:
   runAsNonRoot: true
   runAsUser: 10001
-  runAsGroup: 101
+  runAsGroup: 10001
   allowPrivilegeEscalation: false
   capabilities: { drop: ["ALL"] }
   readOnlyRootFilesystem: true   # verified in-cluster; no writable /tmp was needed
@@ -196,6 +196,23 @@ grpcurl -plaintext -proto proto/recommendation.proto \
 grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Health/Check
 ```
 
+## Develop
+
+Requirements: Python 3.12 (what the image runs) or 3.13 (`.python-version`), [uv](https://github.com/astral-sh/uv) for the virtualenv, Docker for the image, Python 3.12 for the docs check. The commands below are the ones the shared pipeline (`platform-demo-workflows`, `service-ci-python`) runs, so a failure can be reproduced without pushing. Setup: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt` (the venv for the table below was made outside the repository). `Running locally` above has the run commands.
+
+| Step | Command | Result on 2026-11-21 |
+|---|---|---|
+| Format and lint | `ruff format --check . && ruff check .` (the shared pipeline installs ruff with the version it pins) | run (ruff 0.17.2 from a separate venv): all checks passed, 28 files already formatted |
+| Unit tests | `pytest` (`pytest.ini` sets `pythonpath=src`; the tests that need stubs compile the protos into a temp dir) | run: 140 passed |
+| Proto stubs | the `grpc_tools.protoc` command in Running locally (what the Dockerfile does) | not run for this table (the test suite compiles them itself) |
+| Security scan | `bandit -r src/ -c pyproject.toml` | run (bandit 1.9.4 from a separate venv): exit 0, no issues |
+| Dependency audit | `pip-audit -r requirements.txt` | run: no known vulnerabilities found |
+| Image | `docker build -t platform-demo/recommendation-service:local .` | not run today |
+| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/recommendation-service:local` | not run today |
+| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 58 commits): no leaks found |
+| Workflow lint | `actionlint` | run (actionlint 1.7.12), no findings |
+| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed |
+
 ## Project structure
 
 ```
@@ -210,7 +227,7 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 ├── requirements.in / requirements.txt / requirements-dev.txt
 ├── pyproject.toml / pytest.ini / .python-version / .trivyignore
 ├── Dockerfile / .dockerignore
-└── docs/                # empty placeholder
+└── docs/                # TechDocs pages (mkdocs.yml in the root), docs/adr/ = decisions
 ```
 
 ## Verification status (observability step 3, 2026-11-13)
@@ -227,7 +244,7 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 - Ranking uses only categories, ratings and review counts; `user_id` is not used and nothing is personalised.
 - A category with no other product than the viewed one yields no recommendations (no top-up from the whole shop). At most 150 products per category are considered.
 - The category cache is per replica and lives 60 s; changes in the catalog appear after at most that long.
-- The random fallback still fetches the whole catalog (`ListProducts`) and has no deadline.
+- The random fallback still fetches the whole catalog (`ListProducts`); it uses the same deadline as the ranking calls (`CATALOG_TIMEOUT_SECONDS`, default 2 s) and its failure ends the RPC with `INTERNAL`.
 - Health ignores catalog availability.
 - Health stays `SERVING` during the 2 s shutdown drain (it is static).
 - `requirements.txt` was compiled for Python 3.13 (`--python-version 3.13`) while the image runs 3.12; it installs and runs there (verified by the image build and the local test run on Python 3.12), but the lock was not recompiled for 3.12.

@@ -17,6 +17,8 @@ A gRPC service that returns product recommendations for the platform-demo e-comm
 
 Called by `frontend`. It calls `product-catalog-service`.
 
+Pages: [architecture](architecture.md), [API](api.md), [configuration](configuration.md), [observability](observability.md), [operations](operations.md), [development](development.md), [decisions](adr/0001-rank-by-category-rating-with-random-fallback.md).
+
 ```mermaid
 flowchart LR
   recommendation_service["<b>recommendation-service</b><br/>8080 (gRPC)"]:::me
