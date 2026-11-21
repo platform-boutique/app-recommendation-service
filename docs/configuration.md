@@ -17,7 +17,7 @@
 
 Notes:
 
-- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. The ranking calls have a 2 s deadline each (a constant, not configurable); the random fallback call has none.
+- The catalog channel is created with `grpc.insecure_channel`, which connects lazily — the service starts fine even if the catalog is down; individual RPCs then fail and the service answers from the random fallback. Every catalog call, the random fallback included, has the deadline `CATALOG_TIMEOUT_SECONDS` (default 2 s).
 - Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
 - The former Prometheus endpoint (`METRICS_PORT`) no longer exists. Logs go to stdout as JSON lines and, with telemetry on, are additionally exported over OTLP with trace ids.
 - With every telemetry variable unset the service starts with telemetry and profiling off: the OTel SDK and exporters are not even imported, the RPC metric instruments are API no-ops, and the startup lines are `Connecting to productcatalog at …` and `{"message":"starting", ... "telemetry":"telemetry off, profiling off"}` (the lifecycle test runs the real server and checks them; not re-checked in the image).
