@@ -3,10 +3,14 @@
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PRODUCT_CATALOG_SERVICE_ADDR` | **Yes** | — | `host:port` (no scheme) of product-catalog gRPC. **The process exits at startup with `RuntimeError` if unset** |
+| `CATALOG_TIMEOUT_SECONDS` | No | `2` | Deadline in seconds of EVERY product-catalog call (ranking calls and the random fallback). A number from 0.1 to 30; unset, empty, not a number, `nan`/`inf` or out of range means 2. Logged in the `starting` line |
 | `PORT` | No | `8080` | gRPC listen port |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs**: an absolute `http(s)://host:port` URL, e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Telemetry is on only when this is a valid URL; empty or malformed means off (never a crash). The old `COLLECTOR_SERVICE_ADDR` and `ENABLE_TRACING` are no longer read |
 | `OTEL_SDK_DISABLED` | No | — | `true` (trimmed, any case) forces everything off: telemetry and profiling, even with an endpoint set |
 | `OTEL_METRIC_EXPORT_INTERVAL` | No | `15000` | Milliseconds between metric pushes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | No | `grpc` (fixed) | Not read: the exporters are the OTLP/gRPC ones, built in code (`http/protobuf` is not supported). Listed because the standard names it |
+| `OTEL_RESOURCE_ATTRIBUTES` | No | — | Extra resource attributes (`key=value,key=value`), read by the OpenTelemetry SDK and added to every signal. The service's own attributes (`service.name`, `service.version`, `service.namespace`, `deployment.environment`, `service.instance.id`) win over the same keys here (checked 2026-11-22) |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | No | SDK default (`parentbased_always_on`) | Read by the OpenTelemetry SDK, e.g. `parentbased_traceidratio` with `0.1` (checked 2026-11-22) |
 | `OTEL_SERVICE_NAME` | No | `recommendation-service` | `service.name` — becomes the Prometheus `job` and the Loki `service_name`; keep the default, dashboards depend on it |
 | `SERVICE_VERSION` | No | `dev` | `service.version` resource attribute, the `version` log field and the Pyroscope `version` tag |
 | `SERVICE_COMMIT` | No | `unknown` | Commit id, logged once at start (`message: "starting"`); set it at deploy time |

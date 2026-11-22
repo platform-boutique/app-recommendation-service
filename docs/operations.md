@@ -11,7 +11,7 @@ grpcurl -plaintext localhost:8080 list
 
 ## Shutdown
 
-On SIGTERM or SIGINT the server stops accepting RPCs, lets in-flight ones finish for up to 2 s (`SHUTDOWN_GRACE_SECONDS`), flushes telemetry (bounded, also with an unreachable collector) and exits 0. The lifecycle test runs the real server and checks that SIGTERM ends it with exit 0; a measured `docker stop` was not run for this page.
+On SIGTERM or SIGINT the server stops accepting RPCs, lets in-flight ones finish for up to 2 s (`SHUTDOWN_GRACE_SECONDS`), flushes telemetry (bounded, also with an unreachable collector) and exits 0. The lifecycle test runs the real server and checks that SIGTERM ends it with exit 0; `docker stop` of the image with the OTLP and Pyroscope addresses pointed at an address that never answers took 2.4 s and the exit code was 0 (2026-11-22). `telemetry.shutdown()` waits for its flush for exactly its deadline (2 s by default): measured 2.00-2.02 s against an unreachable collector, also with 24 busy processes on a 12-core host; an earlier note of 5-6 s did not reproduce.
 
 ## Scaling and replicas
 
