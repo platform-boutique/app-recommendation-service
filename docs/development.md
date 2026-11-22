@@ -4,18 +4,19 @@
 
 Requirements: Python 3.12 (what the image runs) or 3.13 (`.python-version`), [uv](https://github.com/astral-sh/uv) for the virtualenv, Docker for the image, Python 3.12 for the docs check. The commands below are the ones the shared pipeline (`platform-demo-workflows`, `service-ci-python`) runs, so a failure can be reproduced without pushing. Setup: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt` (the venv for the table below was made outside the repository). `Running locally` above has the run commands.
 
-| Step | Command | Result on 2026-11-21 |
+| Step | Command | Result on 2026-11-22 |
 |---|---|---|
-| Format and lint | `ruff format --check . && ruff check .` (the shared pipeline installs ruff with the version it pins) | run (ruff 0.17.2 from a separate venv): all checks passed, 28 files already formatted |
-| Unit tests | `pytest` (`pytest.ini` sets `pythonpath=src`; the tests that need stubs compile the protos into a temp dir) | run: 140 passed |
-| Proto stubs | the `grpc_tools.protoc` command in Running locally (what the Dockerfile does) | not run for this table (the test suite compiles them itself) |
+| Format and lint | `ruff format --check . && ruff check .` (the shared pipeline installs ruff with the version it pins) | run (ruff 0.17.0, the pinned CI version, from a separate venv): all checks passed, 28 files already formatted |
+| Unit tests | `pytest` (`pytest.ini` sets `pythonpath=src`; the tests that need stubs compile the protos into a temp dir). `pytest --cov=src` prints coverage (pytest-cov is a dev dependency, report only) | run: 140 passed, coverage 75% (`ranking.py` 100%, `server.py` 67%, `telemetry.py` 52%); `tests/test_lifecycle.py` 5 more times in a row: 43 passed each time |
+| Proto stubs | the `grpc_tools.protoc` command in Running locally (what the Dockerfile does) | run by the image build (and by the test suite in a temp dir) |
 | Security scan | `bandit -r src/ -c pyproject.toml` | run (bandit 1.9.4 from a separate venv): exit 0, no issues |
-| Dependency audit | `pip-audit -r requirements.txt` | run: no known vulnerabilities found |
-| Image | `docker build -t platform-demo/recommendation-service:local .` | not run today |
-| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/recommendation-service:local` | not run today |
-| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 58 commits): no leaks found |
-| Workflow lint | `actionlint` | run (actionlint 1.7.12), no findings |
-| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed |
+| Dependency audit | `pip-audit -r requirements.txt` | run (pip-audit 2.10.1): no known vulnerabilities found |
+| Image | `docker build --platform linux/amd64 -t platform-demo/recommendation-service:local .` | run: built, 179 MB, user `10001:10001`, exec-form HEALTHCHECK healthy; `grpcurl list` shows `RecommendationService`, `Health` and reflection; `docker stop` with the OTLP and Pyroscope addresses pointed at an address that never answers: 2.4 s, exit 0 |
+| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/recommendation-service:local` | run (Trivy 0.76.1): exit 0, no CRITICAL or HIGH findings |
+| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 65 commits): no leaks found |
+| Workflow lint | `actionlint` | not run in this bundle (only the two `uses:` pins of the callers changed; run on 2026-11-21 for the earlier version: no findings) |
+| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed (12 relative links, 0 broken) |
+| Whole shop | `local/up.sh`, `local/smoke.sh` (the local compose stack of the workspace, not part of this repository) | run with this image: `SMOKE PASSED` three times in a row (87 steps each); the product pages of the first four products show the recommendations section with 4 products |
 
 ## Running locally
 

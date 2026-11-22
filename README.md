@@ -38,7 +38,7 @@ The frontend then keeps at most 4 of the returned IDs and fetches each product f
 4. **Cache.** The candidate list of each category (and of the whole shop) is cached in memory for **60 s**, measured on a monotonic clock (`time.monotonic`; the host's wall clock can jump by tens of seconds). The `GetProduct` lookups are not cached. A failed fetch is never cached. The cache is per process (replicas do not share it), so a catalog change shows up after at most 60 s.
 5. **Fallback.** If anything in steps 1-3 fails (catalog down, deadline of 2 s per call exceeded, an older catalog without `ListProductsFiltered`, any other error) the service logs one `WARNING` ("Ranked recommendations unavailable, falling back to random picks: ...") and answers with the **old behaviour**: `ListProducts`, remove the given ids, random sample of up to 5. The caller sees a normal response. Only when that old call fails as well does the caller get `INTERNAL`, as before.
 
-Verified: unit/integration tests (88 when this was written, 130 on 2026-11-14, all green, `ruff check`/`ruff format --check` clean) and a container smoke test on a throwaway docker network against a fake catalog gRPC server (ranked answers for a viewed product, two categories, no ids and an unknown id; with the catalog stopped the cached whole-shop list kept answering and the uncached requests ended in `INTERNAL` because the random fallback needs the catalog too). The catalog-down random fallback with a *working* `ListProducts` is covered by the tests that run the real `server.py`; it was not run in a container, and nothing was run against the real compose catalog.
+Verified: unit/integration tests (88 when this was written, 140 on 2026-11-22, all green, `ruff check`/`ruff format --check` clean) and a container smoke test on a throwaway docker network against a fake catalog gRPC server (ranked answers for a viewed product, two categories, no ids and an unknown id; with the catalog stopped the cached whole-shop list kept answering and the uncached requests ended in `INTERNAL` because the random fallback needs the catalog too). The catalog-down random fallback with a *working* `ListProducts` is covered by the tests that run the real `server.py`; it was not run in a container, and nothing was run against the real compose catalog.
 
 Edge cases: a category with no other product than the viewed one yields an empty list (there is no top-up from the whole shop); the 150-product limit per category means that in a larger category ties on rating at the page boundary are cut in the catalog's name order, not by review count.
 
@@ -52,6 +52,9 @@ Edge cases: a category with no other product than the viewed one yields an empty
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs**: an absolute `http(s)://host:port` URL, e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Telemetry is on only when this is a valid URL; empty or malformed means off (never a crash). The old `COLLECTOR_SERVICE_ADDR` and `ENABLE_TRACING` are no longer read |
 | `OTEL_SDK_DISABLED` | No | — | `true` (trimmed, any case) forces everything off: telemetry and profiling, even with an endpoint set |
 | `OTEL_METRIC_EXPORT_INTERVAL` | No | `15000` | Milliseconds between metric pushes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | No | `grpc` (fixed) | Not read: the exporters are the OTLP/gRPC ones, built in code (`http/protobuf` is not supported). Listed because the standard names it |
+| `OTEL_RESOURCE_ATTRIBUTES` | No | — | Extra resource attributes (`key=value,key=value`), read by the OpenTelemetry SDK and added to every signal. The service's own attributes (`service.name`, `service.version`, `service.namespace`, `deployment.environment`, `service.instance.id`) win over the same keys here (checked 2026-11-22) |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | No | SDK default (`parentbased_always_on`) | Read by the OpenTelemetry SDK, e.g. `parentbased_traceidratio` with `0.1` (checked 2026-11-22) |
 | `OTEL_SERVICE_NAME` | No | `recommendation-service` | `service.name` — becomes the Prometheus `job` and the Loki `service_name`; keep the default, dashboards depend on it |
 | `SERVICE_VERSION` | No | `dev` | `service.version` resource attribute, the `version` log field and the Pyroscope `version` tag |
 | `SERVICE_COMMIT` | No | `unknown` | Commit id, logged once at start (`message: "starting"`); set it at deploy time |
@@ -81,7 +84,7 @@ Multi-stage [`Dockerfile`](Dockerfile):
 - **User:** numeric `USER 10001:10001` (`appuser`/`appgroup`, created with these fixed ids; `id` in the container prints `uid=10001(appuser) gid=10001(appgroup)`). Build args `SERVICE_VERSION` (default `dev`) and `SERVICE_COMMIT` (default `unknown`) set the OCI labels `version`/`revision` (plus `source`, `licenses=Apache-2.0`) and the ENV of the same names.
 - **EXPOSE:** `8080` only.
 - **Docker `HEALTHCHECK`:** exec form (no shell): Python `grpc.channel_ready_future` against `localhost:$PORT`, 8080 when `PORT` is unset or empty.
-- **Image size:** 175 MB uncompressed (`docker images`, local build on 2026-10-27; the earlier ~41 MB figure was not re-measured and is probably the compressed registry size).
+- **Image size:** 179 MB uncompressed (`docker images`, local build on 2026-11-22; the earlier ~41 MB figure was not re-measured and is probably the compressed registry size).
 - **Reproducibility:** the image installs from the fully pinned `requirements.txt` (compiled from `requirements.in` with `uv`), so transitive versions no longer float between builds. The lock was not regenerated in this change.
 - **Build context:** [`.dockerignore`](.dockerignore) keeps `.git`, tests, docs, caches and locally compiled stubs out of the context.
 - The generated stubs are not in git; they only exist after the Docker build.
@@ -200,18 +203,19 @@ grpcurl -plaintext -proto proto/health.proto localhost:8080 grpc.health.v1.Healt
 
 Requirements: Python 3.12 (what the image runs) or 3.13 (`.python-version`), [uv](https://github.com/astral-sh/uv) for the virtualenv, Docker for the image, Python 3.12 for the docs check. The commands below are the ones the shared pipeline (`platform-demo-workflows`, `service-ci-python`) runs, so a failure can be reproduced without pushing. Setup: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt` (the venv for the table below was made outside the repository). `Running locally` above has the run commands.
 
-| Step | Command | Result on 2026-11-21 |
+| Step | Command | Result on 2026-11-22 |
 |---|---|---|
-| Format and lint | `ruff format --check . && ruff check .` (the shared pipeline installs ruff with the version it pins) | run (ruff 0.17.2 from a separate venv): all checks passed, 28 files already formatted |
-| Unit tests | `pytest` (`pytest.ini` sets `pythonpath=src`; the tests that need stubs compile the protos into a temp dir) | run: 140 passed |
-| Proto stubs | the `grpc_tools.protoc` command in Running locally (what the Dockerfile does) | not run for this table (the test suite compiles them itself) |
+| Format and lint | `ruff format --check . && ruff check .` (the shared pipeline installs ruff with the version it pins) | run (ruff 0.17.0, the pinned CI version, from a separate venv): all checks passed, 28 files already formatted |
+| Unit tests | `pytest` (`pytest.ini` sets `pythonpath=src`; the tests that need stubs compile the protos into a temp dir). `pytest --cov=src` prints coverage (pytest-cov is a dev dependency, report only) | run: 140 passed, coverage 75% (`ranking.py` 100%, `server.py` 67%, `telemetry.py` 52%); `tests/test_lifecycle.py` 5 more times in a row: 43 passed each time |
+| Proto stubs | the `grpc_tools.protoc` command in Running locally (what the Dockerfile does) | run by the image build (and by the test suite in a temp dir) |
 | Security scan | `bandit -r src/ -c pyproject.toml` | run (bandit 1.9.4 from a separate venv): exit 0, no issues |
-| Dependency audit | `pip-audit -r requirements.txt` | run: no known vulnerabilities found |
-| Image | `docker build -t platform-demo/recommendation-service:local .` | not run today |
-| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/recommendation-service:local` | not run today |
-| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 58 commits): no leaks found |
-| Workflow lint | `actionlint` | run (actionlint 1.7.12), no findings |
-| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed |
+| Dependency audit | `pip-audit -r requirements.txt` | run (pip-audit 2.10.1): no known vulnerabilities found |
+| Image | `docker build --platform linux/amd64 -t platform-demo/recommendation-service:local .` | run: built, 179 MB, user `10001:10001`, exec-form HEALTHCHECK healthy; `grpcurl list` shows `RecommendationService`, `Health` and reflection; `docker stop` with the OTLP and Pyroscope addresses pointed at an address that never answers: 2.4 s, exit 0 |
+| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/recommendation-service:local` | run (Trivy 0.76.1): exit 0, no CRITICAL or HIGH findings |
+| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 65 commits): no leaks found |
+| Workflow lint | `actionlint` | not run in this bundle (only the two `uses:` pins of the callers changed; run on 2026-11-21 for the earlier version: no findings) |
+| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed (12 relative links, 0 broken) |
+| Whole shop | `local/up.sh`, `local/smoke.sh` (the local compose stack of the workspace, not part of this repository) | run with this image: `SMOKE PASSED` three times in a row (87 steps each); the product pages of the first four products show the recommendations section with 4 products |
 
 ## Project structure
 
@@ -230,14 +234,15 @@ Requirements: Python 3.12 (what the image runs) or 3.13 (`.python-version`), [uv
 └── docs/                # TechDocs pages (mkdocs.yml in the root), docs/adr/ = decisions
 ```
 
-## Verification status (observability step 3, 2026-11-13)
+## Verification status (observability step 3, 2026-11-13; final bundle 2026-11-22)
 
 | What | Result |
 |---|---|
 | `uv venv --python 3.12` (3.12.3), `uv pip install -r requirements.txt -r requirements-dev.txt`, stubs generated into `src/generated`, `pytest` | 130 passed. New: env matrix (endpoint, Pyroscope, resource attributes), log golden line and trace ids (in-process gRPC server with an in-memory exporter), JSON startup failure, malformed endpoint does not crash |
 | `uvx ruff check .` and `ruff format --check .` | clean |
 | Rollout prep 2026-11-14, merged head (origin/main merged in): same venv recipe, `pytest`; `ruff check .` / `ruff format --check .`; `docker build` (image runs as `10001:10001`, then removed) | 130 passed; ruff clean; build ok |
-| NOT run | the compose stack, Tempo/Loki/Mimir/Pyroscope queries, telemetry ON against a real collector |
+| Final bundle 2026-11-22 | see the Develop table above: pytest, ruff, bandit, pip-audit, image + Trivy, gitleaks, docs build and the whole shop (smoke 3 times) were run |
+| NOT run | Tempo/Loki/Mimir/Pyroscope queries, telemetry ON against a real collector (only an unreachable one: shutdown and exit were measured), more than one replica |
 
 ## Known limitations
 
@@ -246,5 +251,6 @@ Requirements: Python 3.12 (what the image runs) or 3.13 (`.python-version`), [uv
 - The category cache is per replica and lives 60 s; changes in the catalog appear after at most that long.
 - The random fallback still fetches the whole catalog (`ListProducts`); it uses the same deadline as the ranking calls (`CATALOG_TIMEOUT_SECONDS`, default 2 s) and its failure ends the RPC with `INTERNAL`.
 - Health ignores catalog availability.
+- Metrics are RED, `build_info` and runtime metrics. There is no business counter (OBS-20 names orders, reservations and payments, none of which this service owns); how often the random fallback answers is visible only as `WARNING` logs (decision 2026-11-22).
 - Health stays `SERVING` during the 2 s shutdown drain (it is static).
 - `requirements.txt` was compiled for Python 3.13 (`--python-version 3.13`) while the image runs 3.12; it installs and runs there (verified by the image build and the local test run on Python 3.12), but the lock was not recompiled for 3.12.
